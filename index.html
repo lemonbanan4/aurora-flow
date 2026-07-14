@@ -54,6 +54,29 @@
     line-height: 1.5;
   }
   .hud.faded { opacity: 0; }
+  .sound-btn {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    color: rgba(255, 255, 255, 0.85);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 13px;
+    background: rgba(10, 12, 20, 0.45);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    padding: 9px 16px;
+    cursor: pointer;
+    user-select: none;
+    transition: border-color 0.3s, color 0.3s, box-shadow 0.3s;
+  }
+  .sound-btn:hover { border-color: rgba(255, 255, 255, 0.35); }
+  .sound-btn.active {
+    color: #7de2ff;
+    border-color: rgba(125, 226, 255, 0.5);
+    box-shadow: 0 0 18px rgba(125, 226, 255, 0.25);
+  }
   .stats {
     position: fixed;
     bottom: 18px;
@@ -80,8 +103,9 @@
 <canvas id="c"></canvas>
 <div class="hud" id="hud">
   <h1>Aurora Flow</h1>
-  <p>Two million particles riding a real-time fluid.<br>Move your cursor to stir it. Click for a burst.</p>
+  <p>Two million particles riding a real-time fluid.<br>Move your cursor to stir it. Click for a burst.<br>Hit the 🎤 button and play some music.</p>
 </div>
+<button class="sound-btn" id="soundBtn">🎤 sound reactive: off</button>
 <div class="stats" id="stats"></div>
 <div class="error" id="err"><p>Sorry — this demo needs WebGL2 with float-texture support.</p></div>
 
@@ -681,6 +705,111 @@ window.addEventListener('touchmove', e => e.preventDefault(), { passive: false }
 // hide the HUD after a while
 setTimeout(() => document.getElementById('hud').classList.add('faded'), 9000);
 
+// ---------------------------------------------------------------- sound reactive
+
+const soundBtn = document.getElementById('soundBtn');
+let audio = null;
+let audioState = 'off'; // off | on | muted | blocked
+
+async function enableSound() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+  });
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.7;
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  const BANDS = 24;
+  audio = {
+    ctx, analyser,
+    data: new Uint8Array(analyser.frequencyBinCount),
+    BANDS,
+    smooth: new Float32Array(BANDS), // fast follower per band
+    base: new Float32Array(BANDS),   // slow baseline per band
+    bassAvg: 0.05,
+    beatCooldown: 0,
+    hueShift: 0,
+  };
+}
+
+soundBtn.addEventListener('click', async () => {
+  if (audioState === 'off' || audioState === 'blocked') {
+    soundBtn.textContent = '🎤 requesting mic…';
+    try {
+      if (!audio) await enableSound();
+      await audio.ctx.resume();
+      audioState = 'on';
+      soundBtn.textContent = '🎤 sound reactive: on';
+      soundBtn.classList.add('active');
+    } catch (e) {
+      audioState = 'blocked';
+      soundBtn.textContent = '🎤 mic blocked — check permissions';
+    }
+  } else if (audioState === 'on') {
+    audio.ctx.suspend();
+    audioState = 'muted';
+    soundBtn.textContent = '🎤 sound reactive: off';
+    soundBtn.classList.remove('active');
+  } else {
+    await audio.ctx.resume();
+    audioState = 'on';
+    soundBtn.textContent = '🎤 sound reactive: on';
+    soundBtn.classList.add('active');
+  }
+});
+
+function processAudio(dt) {
+  const { analyser, data, BANDS, smooth, base } = audio;
+  analyser.getByteFrequencyData(data);
+  const usable = Math.floor(data.length * 0.7); // top of the FFT is mostly empty
+  const per = Math.max(1, Math.floor(usable / BANDS));
+  audio.hueShift = (audio.hueShift + dt * 0.02) % 1;
+
+  // per-band onset = fast follower rising above its slow baseline
+  const onsets = [];
+  for (let b = 0; b < BANDS; b++) {
+    let sum = 0;
+    for (let i = b * per, end = i + per; i < end; i++) sum += data[i];
+    const energy = sum / (per * 255);
+    smooth[b] += (energy - smooth[b]) * 0.5;
+    base[b] += (smooth[b] - base[b]) * 0.04;
+    const onset = smooth[b] - base[b];
+    if (onset > 0.06) onsets.push([onset, b]);
+  }
+  onsets.sort((p, q) => q[0] - p[0]);
+
+  // strongest bands fire jets from the bottom: bass left, treble right
+  for (let i = 0; i < Math.min(onsets.length, 3); i++) {
+    const [onset, b] = onsets[i];
+    const strength = Math.min(onset * 3, 1);
+    const x = (b + 0.2 + 0.6 * Math.random()) / BANDS;
+    const hue = (b / BANDS * 0.85 + audio.hueShift) % 1;
+    const [r, g, bl] = HSVtoRGB(hue, 1, 1);
+    const c = 0.05 + 0.45 * strength;
+    splat(x, 0.08 + 0.05 * Math.random(),
+          400 * (Math.random() - 0.5),
+          1200 + 4500 * strength,
+          [r * c, g * c, bl * c]);
+  }
+
+  // beat detection on the low bands -> radial burst
+  const bass = (smooth[0] + smooth[1] + smooth[2]) / 3;
+  audio.bassAvg += (bass - audio.bassAvg) * 0.02;
+  audio.beatCooldown -= dt;
+  if (bass > 0.22 && bass > audio.bassAvg * 1.35 && audio.beatCooldown <= 0) {
+    audio.beatCooldown = 0.22;
+    const cx = 0.35 + 0.3 * Math.random();
+    const cy = 0.35 + 0.3 * Math.random();
+    const kick = Math.min((bass - audio.bassAvg) * 4, 1.5);
+    for (let i = 0; i < 6; i++) {
+      const ang = (i / 6) * Math.PI * 2 + Math.random();
+      const col = nextColor().map(v => v * (6 + 10 * kick));
+      splat(cx, cy, Math.cos(ang) * 3000 * kick, Math.sin(ang) * 3000 * kick, col);
+    }
+  }
+}
+
 // ---------------------------------------------------------------- main loop
 
 let lastTime = performance.now() / 1000;
@@ -712,9 +841,11 @@ function frame() {
     }
   }
 
-  // ambient life when idle
+  if (audio && audioState === 'on') processAudio(dt);
+
+  // ambient life when idle (the music takes over when sound mode is on)
   idleTimer += dt;
-  if (idleTimer > config.IDLE_SPLAT_INTERVAL && now - lastInteraction > 3.5) {
+  if (idleTimer > config.IDLE_SPLAT_INTERVAL && now - lastInteraction > 3.5 && audioState !== 'on') {
     idleTimer = 0;
     randomSplats(1 + Math.floor(Math.random() * 2));
   }
