@@ -54,10 +54,14 @@
     line-height: 1.5;
   }
   .hud.faded { opacity: 0; }
-  .sound-btn {
+  .controls {
     position: fixed;
     top: 24px;
     right: 24px;
+    display: flex;
+    gap: 10px;
+  }
+  .pill {
     color: rgba(255, 255, 255, 0.85);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 13px;
@@ -71,8 +75,8 @@
     user-select: none;
     transition: border-color 0.3s, color 0.3s, box-shadow 0.3s;
   }
-  .sound-btn:hover { border-color: rgba(255, 255, 255, 0.35); }
-  .sound-btn.active {
+  .pill:hover { border-color: rgba(255, 255, 255, 0.35); }
+  .pill.active {
     color: #7de2ff;
     border-color: rgba(125, 226, 255, 0.5);
     box-shadow: 0 0 18px rgba(125, 226, 255, 0.25);
@@ -105,7 +109,10 @@
   <h1>Aurora Flow</h1>
   <p>Two million particles riding a real-time fluid.<br>Move your cursor to stir it. Click for a burst.<br>Hit the 🎤 button and play some music.</p>
 </div>
-<button class="sound-btn" id="soundBtn">🎤 sound reactive: off</button>
+<div class="controls">
+  <button class="pill" id="soundBtn">🎤 sound reactive: off</button>
+  <button class="pill" id="fsBtn">⛶ fullscreen</button>
+</div>
 <div class="stats" id="stats"></div>
 <div class="error" id="err"><p>Sorry — this demo needs WebGL2 with float-texture support.</p></div>
 
@@ -459,14 +466,36 @@ function getResolution(resolution) {
 
 let dye, velocity, divergence, curl, pressure;
 
+function deleteFBO(fbo) {
+  gl.deleteTexture(fbo.texture);
+  gl.deleteFramebuffer(fbo.fbo);
+}
+
 function initFramebuffers() {
   const simRes = getResolution(config.SIM_RESOLUTION);
   const dyeRes = getResolution(config.DYE_RESOLUTION);
+  const oldDye = dye, oldVelocity = velocity;
   dye = createDoubleFBO(dyeRes.width, dyeRes.height, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
   velocity = createDoubleFBO(simRes.width, simRes.height, gl.RG16F, gl.RG, gl.HALF_FLOAT, gl.LINEAR);
+  if (divergence) { deleteFBO(divergence); deleteFBO(curl); deleteFBO(pressure.read); deleteFBO(pressure.write); }
   divergence = createFBO(simRes.width, simRes.height, gl.R16F, gl.RED, gl.HALF_FLOAT, gl.NEAREST);
   curl = createFBO(simRes.width, simRes.height, gl.R16F, gl.RED, gl.HALF_FLOAT, gl.NEAREST);
   pressure = createDoubleFBO(simRes.width, simRes.height, gl.R16F, gl.RED, gl.HALF_FLOAT, gl.NEAREST);
+  // carry the artwork across a resize instead of wiping it
+  if (oldDye) {
+    gl.disable(gl.BLEND);
+    clearProgram.bind();
+    gl.uniform2f(clearProgram.uniforms.texelSize, dye.texelSizeX, dye.texelSizeY);
+    gl.uniform1f(clearProgram.uniforms.value, 1.0);
+    gl.uniform1i(clearProgram.uniforms.uTexture, oldDye.read.attach(0));
+    blit(dye.write);
+    dye.swap();
+    gl.uniform1i(clearProgram.uniforms.uTexture, oldVelocity.read.attach(0));
+    blit(velocity.write);
+    velocity.swap();
+    deleteFBO(oldDye.read); deleteFBO(oldDye.write);
+    deleteFBO(oldVelocity.read); deleteFBO(oldVelocity.write);
+  }
 }
 initFramebuffers();
 
@@ -704,6 +733,27 @@ window.addEventListener('touchmove', e => e.preventDefault(), { passive: false }
 
 // hide the HUD after a while
 setTimeout(() => document.getElementById('hud').classList.add('faded'), 9000);
+
+// ---------------------------------------------------------------- fullscreen
+
+const fsBtn = document.getElementById('fsBtn');
+function isFullscreen() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+fsBtn.addEventListener('click', () => {
+  const el = document.documentElement;
+  if (isFullscreen()) {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  } else {
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) { const p = req.call(el); if (p && p.catch) p.catch(() => {}); }
+  }
+});
+function onFsChange() {
+  fsBtn.textContent = isFullscreen() ? '✕ exit fullscreen' : '⛶ fullscreen';
+}
+document.addEventListener('fullscreenchange', onFsChange);
+document.addEventListener('webkitfullscreenchange', onFsChange);
 
 // ---------------------------------------------------------------- sound reactive
 
